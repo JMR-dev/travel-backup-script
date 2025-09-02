@@ -1,15 +1,14 @@
+#!/usr/bin/env python3
 import argparse
-import subprocess
 import os
+import subprocess
 import sys
-from shutil import which
 from dotenv import load_dotenv
 
-
-def build_repo(endpoint: str, bucket: str, prefix: str) -> str:
+def build_repo(endpoint: str, bucket: str, prefix: str = None) -> str:
     """
     Build a restic S3 repository URL in the correct format:
-    s3:ENDPOINT/BUCKET/PREFIX
+    s3:ENDPOINT/BUCKET[/PREFIX]
     """
     parts = [f"s3:{endpoint.rstrip('/')}"]
     if bucket:
@@ -18,119 +17,51 @@ def build_repo(endpoint: str, bucket: str, prefix: str) -> str:
         parts.append(prefix.strip("/"))
     return "/".join(parts)
 
+def run_restic(repo: str, source: str, dry_run: bool = False):
+    """Run restic backup command."""
+    cmd = [
+        "restic",
+        "-r", repo,
+        "backup",
+        source,
+    ]
+    print("Repository:", repo)
+    print("Command:", " ".join(cmd))
+    print("Environment (redacted):")
+    for key in ("WASABI_ENDPOINT", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RESTIC_PASSWORD"):
+        if key in os.environ:
+            print(f"  {key}=***REDACTED***")
+    if dry_run:
+        print("Dry-run mode: not running restic.")
+        return 0
+    return subprocess.call(cmd)
 
-def redact_env(env: dict) -> dict:
-    """Return a copy of env with secrets redacted."""
-    redacted = env.copy()
-    for k in ("AWS_SECRET_ACCESS_KEY", "RESTIC_PASSWORD", "AWS_SECRET_KEY"):
-        if k in redacted and redacted[k]:
-            redacted[k] = "***REDACTED***"
-    return redacted
+def main():
+    # Load environment variables from .env.local (if present)
+    load_dotenv(".env.local")
 
+    parser = argparse.ArgumentParser(description="Backup files to Wasabi S3 with restic")
+    parser.add_argument("--source", required=True, help="Path to file or directory to back up")
+    parser.add_argument("--bucket", help="Wasabi S3 bucket name")
+    parser.add_argument("--prefix", help="Prefix (folder) inside bucket", default=None)
+    parser.add_argument("--region", default="us-east-1", help="Wasabi region, e.g. us-west-1")
+    parser.add_argument("--repository", help="Full restic repository string (overrides bucket/prefix)")
+    parser.add_argument("--dry-run", action="store_true", help="Print command instead of running it")
+    args = parser.parse_args()
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(
-        description="Backup files to a Wasabi (S3) bucket using restic."
-    )
-    parser.add_argument("--source", "-s", required=True,
-                        help="Source path to back up (file or directory)")
-    parser.add_argument("--bucket", "-b",
-                        help="Wasabi bucket name (can be omitted if --repository is used)")
-    parser.add_argument("--endpoint", "-e",
-                        default=os.environ.get("WASABI_ENDPOINT", "s3.wasabisys.com"),
-                        help="Wasabi S3 endpoint host (default: s3.wasabisys.com or WASABI_ENDPOINT env)")
-    parser.add_argument("--prefix", "-p",
-                        default=os.environ.get("RESTIC_PREFIX", "travel-backup"),
-                        help="Prefix/path inside the bucket (default: travel-backup)")
-    parser.add_argument("--access-key",
-                        help="Wasabi access key (falls back to .env or AWS_ACCESS_KEY_ID env)")
-    parser.add_argument("--secret-key",
-                        help="Wasabi secret key (falls back to .env or AWS_SECRET_ACCESS_KEY env)")
-    parser.add_argument("--password", "-P",
-                        help="Restic repository password (falls back to .env or RESTIC_PASSWORD env)")
-    parser.add_argument("--repository", "-r",
-                        help="Full restic repository string (overrides bucket+endpoint+prefix)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Print the restic command and environment without running it")
-    parser.add_argument("--verbose", action="store_true", help="Show more output")
-    parser.add_argument("--env-file", default=".env",
-                        help="Path to .env file (default: .env)")
+    # Endpoint based on region (unless already set in env)
+    endpoint = os.getenv("WASABI_ENDPOINT", f"s3.{args.region}.wasabisys.com")
 
-    args = parser.parse_args(argv)
-
-    # Load env file (if it exists)
-    if os.path.exists(args.env_file):
-        load_dotenv(args.env_file)
-
-    # Validate source path
-    src = args.source
-    if not os.path.exists(src):
-        print(f"error: source path does not exist: {src}")
-        return 2
-
-    # Build repository string
+    # Build repo string
     if args.repository:
         repo = args.repository
     else:
         if not args.bucket:
             print("error: --bucket is required when --repository is not provided")
             return 2
-        repo = build_repo(args.endpoint, args.bucket, args.prefix)
+        repo = build_repo(endpoint, args.bucket, args.prefix)
 
-    # Prepare environment
-    env = os.environ.copy()
-
-    # Apply CLI > env > .env precedence
-    if args.password:
-        env["RESTIC_PASSWORD"] = args.password
-    if args.access_key:
-        env["AWS_ACCESS_KEY_ID"] = args.access_key
-    if args.secret_key:
-        env["AWS_SECRET_ACCESS_KEY"] = args.secret_key
-
-    # Validation: ensure critical vars exist
-    missing = []
-    for var in ("RESTIC_PASSWORD", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
-        if not env.get(var):
-            missing.append(var)
-    if missing:
-        print(f"error: missing required environment variables: {', '.join(missing)}")
-        print(f"tip: define them in {args.env_file} or pass as CLI args")
-        return 2
-
-    # Ensure restic is installed
-    if which("restic") is None:
-        print("error: restic binary not found in PATH. Install restic and try again.")
-        return 3
-
-    cmd = ["restic", "-r", repo, "backup", src]
-
-    if args.verbose or args.dry_run:
-        print("Repository:", repo)
-        print("Command:", " ".join(cmd))
-        print("Environment (redacted):")
-        for k, v in redact_env(env).items():
-            if k.startswith("AWS_") or k.startswith("RESTIC_") or k in ("WASABI_ENDPOINT",):
-                print(f"  {k}={v}")
-
-    if args.dry_run:
-        print("Dry-run mode: not running restic.")
-        return 0
-
-    # Run restic
-    try:
-        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    except Exception as exc:
-        print("error: failed to run restic:", exc)
-        return 4
-
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
-
-    return result.returncode
-
+    return run_restic(repo, args.source, args.dry_run)
 
 if __name__ == "__main__":
     sys.exit(main())
