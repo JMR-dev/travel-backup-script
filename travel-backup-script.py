@@ -25,21 +25,30 @@ def run_restic(repo: str, source: str, dry_run: bool = False):
         "backup",
         source,
     ]
+    
     print("Repository:", repo)
     print("Command:", " ".join(cmd))
     print("Environment (redacted):")
-    for key in ("WASABI_ENDPOINT", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RESTIC_PASSWORD"):
+    
+    # Check which env vars are available
+    env_vars = ("WASABI_ENDPOINT", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "RESTIC_PASSWORD")
+    for key in env_vars:
         if key in os.environ:
             print(f"  {key}=***REDACTED***")
+        else:
+            print(f"  {key}=NOT SET")
+    
     if dry_run:
         print("Dry-run mode: not running restic.")
         return 0
-    return subprocess.call(cmd)
+    
+    # Pass the current environment explicitly
+    return subprocess.call(cmd, env=os.environ.copy())
 
 def main():
     # Load environment variables from .env.local (if present)
     load_dotenv(".env.local")
-
+    
     parser = argparse.ArgumentParser(description="Backup files to Wasabi S3 with restic")
     parser.add_argument("--source", required=True, help="Path to file or directory to back up")
     parser.add_argument("--bucket", help="Wasabi S3 bucket name")
@@ -47,11 +56,12 @@ def main():
     parser.add_argument("--region", default="us-east-1", help="Wasabi region, e.g. us-west-1")
     parser.add_argument("--repository", help="Full restic repository string (overrides bucket/prefix)")
     parser.add_argument("--dry-run", action="store_true", help="Print command instead of running it")
+    
     args = parser.parse_args()
-
+    
     # Endpoint based on region (unless already set in env)
     endpoint = os.getenv("WASABI_ENDPOINT", f"s3.{args.region}.wasabisys.com")
-
+    
     # Build repo string
     if args.repository:
         repo = args.repository
@@ -60,7 +70,7 @@ def main():
             print("error: --bucket is required when --repository is not provided")
             return 2
         repo = build_repo(endpoint, args.bucket, args.prefix)
-
+    
     return run_restic(repo, args.source, args.dry_run)
 
 if __name__ == "__main__":
