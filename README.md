@@ -1,61 +1,127 @@
 # Wasabi Restic Backup Script
 
-This script automates backups to a [Wasabi](https://wasabi.com/) (S3-compatible) bucket using [restic](https://restic.net/).  
-It supports environment-based secrets (via `.env` + [python-dotenv](https://pypi.org/project/python-dotenv/)), CLI overrides, and dry-run/verbose modes.
-
----
+This script automates backups to a [Wasabi](https://wasabi.com/) S3-compatible bucket using [restic](https://restic.net/).
+It loads secrets from `.env.local`, builds a restic repository string, and runs `restic backup` with redacted environment logging.
 
 ## Features
 
-- Backup any file or directory to Wasabi S3 storage with restic.
-- Secrets loaded from a `.env` file (no need to type passwords on the CLI).
-- CLI arguments override `.env` and system environment variables.
-- Verbose and dry-run modes for debugging.
-- Environment variable redaction in output (so logs won’t leak secrets).
-
----
+- Two subcommands: `init` (initialize a new repository) and `backup` (run a backup).
+- Backup a single source path with `-s/--source`.
+- Backup multiple source paths from a JSON config file with `-f/--file`.
+- Load secrets from `.env.local` via [python-dotenv](https://pypi.org/project/python-dotenv/).
+- Support a prebuilt restic repository via `--repository` or `RESTIC_REPOSITORY`.
+- Redact sensitive environment values in output.
+- Support dry-run mode for command verification.
 
 ## Requirements
 
 - Python 3.8+
-- [restic](https://restic.net/) installed and in your `PATH`
-- `python-dotenv` installed:
-  ```bash
-  pip install python-dotenv
+- [restic](https://restic.net/) installed and available on `PATH`
+- Install dependencies:
 
+```bash
+pip install -r requirements.txt
+```
 
-## Initialize the Repository (first run only)
+## Environment Variables
 
-restic -r s3:s3.[REGION].wasabisys.com/[BUCKET_NAME]/[PREFIX] init
+The script loads `.env.local` automatically and uses these variables:
 
+| Variable | Required | Description |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID` | Yes | Wasabi access key |
+| `AWS_SECRET_ACCESS_KEY` | Yes | Wasabi secret key |
+| `RESTIC_PASSWORD` | Yes | Restic repository encryption password |
+| `WASABI_ENDPOINT` | No | S3 endpoint (defaults to `s3.<region>.wasabisys.com`) |
+| `WASABI_REGION` | No | Wasabi region, e.g. `us-east-2` (used to derive endpoint) |
+| `WASABI_BUCKET` | No | Bucket name (used when `RESTIC_REPOSITORY` is not set) |
+| `RESTIC_REPOSITORY` | No | Full restic repository string (overrides bucket/prefix/region) |
+| `RESTIC_PREFIX` | No | Prefix (folder) inside bucket |
+| `FILE_PATH_CONFIG_PATH` | No | Path to JSON config file (backup subcommand only) |
+
+Only `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `RESTIC_PASSWORD`, and `WASABI_ENDPOINT` are passed to the restic subprocess. The script builds a minimal environment to avoid leaking unrelated variables.
+
+Create a `RESTIC_PASSWORD` via `openssl rand -base64 32` for best security.
+
+## Subcommands
+
+### `init` — Initialize a New Repository
+
+```bash
+python travel-backup-script.py init --bucket my-bucket --region us-east-2 --dry-run
+```
+
+### `backup` — Run a Backup
+
+```bash
+python travel-backup-script.py backup --source /etc --bucket my-bucket --dry-run
+```
+
+## Repository Resolution
+
+The repository string is resolved in this order:
+
+1. `--repository` CLI flag or `RESTIC_REPOSITORY` env var (must match `s3:s3.<region>.wasabisys.com/<bucket>[/<prefix>]`).
+2. Otherwise, built from `--bucket` / `WASABI_BUCKET`, `--region` / `WASABI_REGION`, `WASABI_ENDPOINT`, and `--prefix` / `RESTIC_PREFIX`.
 
 ## CLI Options
 
-Option	Description
---source, -s	Source path to back up (required)
---bucket, -b	Wasabi bucket name (required unless --repository used)
---endpoint, -e	S3 endpoint (default: s3.wasabisys.com or from env)
---prefix, -p	Path inside bucket (default: travel-backup)
---access-key	Wasabi access key (overrides env/.env)
---secret-key	Wasabi secret key (overrides env/.env)
---password, -P	Restic password (overrides env/.env)
---repository, -r	Full restic repository string (overrides bucket/endpoint/prefix)
---env-file	Path to .env file (default: .env)
---dry-run	Show command and env but do not execute
---verbose	Show extra debug info
+Shared options (both `init` and `backup`):
 
-## Example Dry Run
-python travel-backup-backup.py --source /etc --bucket my-bucket --dry-run --verbose
+- `--bucket`: Wasabi bucket name (or set `WASABI_BUCKET`)
+- `--prefix`: Prefix inside the bucket (or set `RESTIC_PREFIX`)
+- `--region`: Wasabi region, e.g. `us-east-2` (or set `WASABI_REGION`)
+- `--repository`: Full restic repository string (or set `RESTIC_REPOSITORY`)
+- `--dry-run`: Print the command and redacted environment without running `restic`
 
+Backup-only options:
 
-## Run the Backup
+- `-s`, `--source`: Single file or directory to back up
+- `-f`, `--file`: Path to a JSON file containing `{"paths": ["..."]}`
 
-python backup.py --source /path/to/data --bucket my-bucket
+`-s/--source` and `-f/--file` are mutually exclusive. One of them (or the `FILE_PATH_CONFIG_PATH` env var) is required for backup.
 
-**Example with overrides:**
-python backup.py \
-  --source ~/Documents \
-  --bucket my-bucket \
-  --prefix laptop-backups \
-  --verbose
+## JSON File Format
 
+Example config:
+
+```json
+{
+  "paths": [
+    "/path/to/Documents",
+    "/path/to/Pictures"
+  ]
+}
+```
+
+## Examples
+
+Initialize a repository (dry run):
+
+```bash
+python travel-backup-script.py init --bucket my-bucket --region us-east-2 --dry-run
+```
+
+Backup a single source (dry run):
+
+```bash
+python travel-backup-script.py backup --source /etc --bucket my-bucket --dry-run
+```
+
+Backup from a JSON file (dry run):
+
+```bash
+python travel-backup-script.py backup --file backup-paths.json --bucket my-bucket --dry-run
+```
+
+Use a custom prefix:
+
+```bash
+python travel-backup-script.py backup --source ~/Documents --bucket my-bucket --prefix laptop-backups
+```
+
+Use a full repository string:
+
+```bash
+python travel-backup-script.py backup --source ~/Documents --repository s3:s3.us-east-2.wasabisys.com/my-bucket/laptop-backups
+```
